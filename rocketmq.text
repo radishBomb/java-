@@ -1,0 +1,95 @@
+1、RocketMQ由哪些角色组成，每个角色作用和特点是什么？
+    Nameserver	无状态，动态列表；这也是和zookeeper的重要区别之一。zookeeper是有状态的。
+    Producer	消息生产者，负责发消息到Broker。
+    Broker	就是MQ本身，负责收发消息、持久化消息等。
+    Consumer	消息消费者，负责从Broker上拉取消息进行消费，消费完进行ack。
+
+2、RocketMQ Broker中的消息被消费后会立即删除吗？
+    不会，每条消息都会持久化到CommitLog中，每个Consumer连接到Broker后会维持消费进度信息，当有消息消费后只是当前Consumer的消费进度（CommitLog的offset）更新了。
+
+3、消费消息是push还是pull？
+    RocketMQ没有真正意义的push，都是pull，虽然有push类，但实际底层实现采用的是长轮询机制，即拉取方式
+    broker端属性 longPollingEnable 标记是否开启长轮询。默认开启
+    注： push可能会造成消息在consumer端堆积过多
+
+4、RocketMQ消费模式有几种？
+    1.集群消费: 一条消息只会被同Group中的一个Consumer消费
+              多个Group同时消费一个Topic时，每个Group都会有一个Consumer消费到数据
+    2.广播消费: 消息将对一 个Consumer Group 下的各个 Consumer 实例都消费一遍。即即使这些 Consumer 属于同一个Consumer Group
+               消息也会被 Consumer Group 中的每个 Consumer 都消费一次。
+
+5、RocketMQ如何做负载均衡？
+    通过Topic在多Broker中分布式存储实现。
+    producer端： 发送端指定message queue发送消息到相应的broker，来达到写入时的负载均衡
+    consumer端：采用的是平均分配算法来进行负载均衡。
+
+    其他负载均衡算法：
+        平均分配策略(默认)(AllocateMessageQueueAveragely)
+        环形分配策略(AllocateMessageQueueAveragelyByCircle)
+        手动配置分配策略(AllocateMessageQueueByConfig)
+        机房分配策略(AllocateMessageQueueByMachineRoom)
+        一致性哈希分配策略(AllocateMessageQueueConsistentHash)
+        靠近机房策略(AllocateMachineRoomNearby)
+
+6、消息重复消费
+    影响消息正常发送和消费的重要原因是网络的不确定性。
+    引起重复消费的原因
+
+    ACK
+    正常情况下在consumer真正消费完消息后应该发送ack，通知broker该消息已正常消费，从queue中剔除
+
+    当ack因为网络原因无法发送到broker，broker会认为词条消息没有被消费，此后会开启消息重投机制把消息再次投递到consumer
+
+    消费模式
+    在CLUSTERING模式下，消息在broker中会保证相同group的consumer消费一次，但是针对不同group的consumer会推送多次
+
+    解决方案：
+        数据库表
+        处理消息前，使用消息主键在表中带有约束的字段中insert（例如唯一索引）
+
+        Map
+        单机时可以使用map ConcurrentHashMap -> putIfAbsent guava cache
+
+        Redis
+        分布式锁搞起来。
+
+
+7、如何让RocketMQ保证消息的顺序消费
+    首先多个queue只能保证单个queue里的顺序，queue是典型的FIFO，天然顺序。多个queue同时消费是无法绝对保证消息的有序性的。所以总结如下：
+    同一topic，同一个QUEUE，发消息的时候一个线程去发送消息，消费的时候 一个线程去消费一个queue里的消息。
+
+    追问：怎么保证消息发到同一个queue？
+    Rocket MQ给我们提供了MessageQueueSelector接口，可以自己重写里面的接口，实现自己的算法，举个最简单的例子：判断i % 2 == 0，那就都放到queue1里，否则放到queue2里。
+
+8、RocketMQ如何保证消息不丢失
+    8.1、Producer端如何保证消息不丢失
+            采取send()同步发消息，发送结果是同步感知的。
+            发送失败后可以重试，设置重试次数。默认3次。
+            集群部署，比如发送失败了的原因可能是当前Broker宕机了，重试的时候会发送到其他Broker上。
+
+    8.2、Broker端如何保证消息不丢失
+            修改刷盘策略为同步刷盘。默认情况下是异步刷盘的。
+            集群部署，主从模式，高可用。
+
+    8.3、Consumer端如何保证消息不丢失
+            完全消费正常后在进行手动ack确认。
+
+9、rocketMQ的消息堆积如何处理
+    首先要找到是什么原因导致的消息堆积，是Producer太多了，Consumer太少了导致的还是说其他情况，总之先定位问题。
+    然后看下消息消费速度是否正常，正常的话，可以通过上线更多consumer临时解决消息堆积问题
+
+    追问：如果Consumer和Queue不对等，上线了多台也在短时间内无法消费完堆积的消息怎么办？
+        备一个临时的topic
+        queue的数量是堆积的几倍
+        queue分布到多Broker中
+        上线一台Consumer做消息的搬运工，把原来Topic中的消息挪到新的Topic里，不做业务逻辑处理，只是挪过去
+        上线N台Consumer同时消费临时Topic中的数据
+        改bug
+        恢复原来的Consumer，继续消费之前的Topic
+
+    追问：堆积时间过长消息超时了？
+        RocketMQ中的消息只会在commitLog被删除的时候才会消失，不会超时。也就是说未被消费的消息不会存在超时删除这情况。
+
+    追问：堆积的消息会不会进死信队列？
+        不会，消息在消费失败后会进入重试队列（%RETRY%+ConsumerGroup），16次（默认16次）才会进入死信队列（%DLQ%+ConsumerGroup）。
+
